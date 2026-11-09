@@ -1,0 +1,40 @@
+name: Stop Linux RDP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  stop:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Cancel active Linux RDP runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Looking for active runs of Start Linux RDP..."
+
+          RUN_IDS="$(gh api \
+            "repos/${GH_REPO}/actions/workflows/rdp.yml/runs?status=in_progress&per_page=100" \
+            --jq '.workflow_runs[].id')"
+
+          if [[ -z "$RUN_IDS" ]]; then
+            echo "No active RDP session was found."
+            exit 0
+          fi
+
+          while IFS= read -r RUN_ID; do
+            [[ -z "$RUN_ID" ]] && continue
+            echo "Requesting cancellation of run ${RUN_ID}..."
+            gh api --method POST \
+              "repos/${GH_REPO}/actions/runs/${RUN_ID}/cancel"
+          done <<< "$RUN_IDS"
+
+          echo "Cancellation requested. The Ubuntu runner will shut down after GitHub cancels the job."
