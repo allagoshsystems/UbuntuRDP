@@ -1,0 +1,95 @@
+name: Start Linux RDP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rdp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Update package lists
+        run: sudo apt-get update
+
+      - name: Install XFCE and XRDP
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            xrdp \
+            dbus-x11 \
+            x11-xserver-utils
+
+      - name: Configure RDP account and XFCE session
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -z "$RDP_PASSWORD" ]]; then
+            echo "::error::Repository secret RDP_PASSWORD is missing."
+            exit 1
+          fi
+
+          printf 'runner:%s\n' "$RDP_PASSWORD" | sudo chpasswd
+
+          printf '%s\n' 'startxfce4' > "$HOME/.xsession"
+          chmod 700 "$HOME/.xsession"
+
+          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
+          #!/bin/sh
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          exec dbus-run-session -- startxfce4
+          EOF
+
+          sudo chmod 755 /etc/xrdp/startwm.sh
+          sudo adduser xrdp ssl-cert || true
+
+      - name: Start XRDP service
+        run: |
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sudo systemctl --no-pager --full status xrdp
+
+      - name: Join Tailscale network
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Show connection information
+        run: |
+          RDP_IP="$(tailscale ip -4 | head -n 1)"
+          if [[ -z "$RDP_IP" ]]; then
+            echo "::error::Could not obtain a Tailscale IPv4 address."
+            exit 1
+          fi
+
+          {
+            echo "## Linux RDP is ready"
+            echo ""
+            echo "| Setting | Value |"
+            echo "|---|---|"
+            echo "| Address | \`$RDP_IP\` |"
+            echo "| Port | \`3389\` |"
+            echo "| Username | \`runner\` |"
+            echo "| Password | The value stored in the \`RDP_PASSWORD\` secret |"
+            echo ""
+            echo "On Windows, connect to Tailscale and open Remote Desktop Connection (\`mstsc\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "RDP address: $RDP_IP"
+          echo "Username: runner"
+          echo "Port: 3389"
+
+      - name: Keep RDP available until stopped
+        shell: bash
+        run: |
+          echo "RDP is running. Use the Stop Linux RDP workflow to end this session."
+          while true; do
+            echo "RDP session active: $(date -u)"
+            sleep 60
+          done
