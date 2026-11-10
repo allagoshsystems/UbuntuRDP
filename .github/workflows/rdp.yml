@@ -36,14 +36,19 @@ jobs:
             network-manager \
             fonts-ubuntu
 
+
       - name: Install Firefox
         run: |
-          wget -q https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US -O firefox.tar.bz2
+          set -e
+
+          wget -q "https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US" \
+            -O firefox.tar.bz2
+
           sudo mkdir -p /opt/firefox
           sudo tar -xjf firefox.tar.bz2 -C /opt/firefox --strip-components=1
+
           sudo ln -sf /opt/firefox/firefox /usr/local/bin/firefox
 
-          sudo mkdir -p /usr/share/applications
           sudo tee /usr/share/applications/firefox.desktop > /dev/null <<'EOF'
           [Desktop Entry]
           Name=Firefox
@@ -53,6 +58,9 @@ jobs:
           Icon=/opt/firefox/browser/chrome/icons/default/default128.png
           Categories=Network;WebBrowser;
           EOF
+
+          firefox --version
+          echo "Firefox installed successfully!"
 
       - name: Configure RDP user and GNOME session
         env:
