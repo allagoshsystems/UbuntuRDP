@@ -1,0 +1,134 @@
+
+name: Windows Server 2025 RDP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-rdp:
+    name: Configure Windows RDP
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 350
+
+    steps:
+      - name: Validate Secrets
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "Missing RDP_PASSWORD secret"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
+            throw "Missing TS_AUTHKEY secret"
+          }
+
+          Write-Host "Required secrets are configured."
+
+      - name: Configure Windows Remote Desktop
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Create or update the remote desktop user
+          $SecurePassword = ConvertTo-SecureString `
+            $env:RDP_PASSWORD -AsPlainText -Force
+
+          $ExistingUser = Get-LocalUser `
+            -Name "rdpuser" -ErrorAction SilentlyContinue
+
+          if ($ExistingUser) {
+            Set-LocalUser -Name "rdpuser" -Password $SecurePassword
+            Enable-LocalUser -Name "rdpuser"
+          }
+          else {
+            New-LocalUser `
+              -Name "rdpuser" `
+              -Password $SecurePassword `
+              -Description "Remote Desktop User" `
+              -PasswordNeverExpires
+          }
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "rdpuser" `
+            -ErrorAction SilentlyContinue
+
+          # Enable RDP
+          $TSPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
+          $RDPPath = "$TSPath\WinStations\RDP-Tcp"
+
+          Set-ItemProperty -Path $TSPath `
+            -Name fDenyTSConnections -Value 0
+
+          Set-ItemProperty -Path $RDPPath `
+            -Name UserAuthentication -Value 1
+
+          Set-Service TermService -StartupType Automatic
+          Start-Service TermService
+
+          # Disable default broad RDP firewall rules
+          Get-NetFirewallRule -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue |
+            Disable-NetFirewallRule
+
+          # Permit RDP only from Tailscale IPv4 addresses
+          Get-NetFirewallRule -DisplayName "RDP over Tailscale only" `
+            -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule
+
+          New-NetFirewallRule `
+            -DisplayName "RDP over Tailscale only" `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -RemoteAddress "100.64.0.0/10" `
+            -Profile Any
+
+          Write-Host "Windows RDP configured."
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Display Connection Details
+        shell: powershell
+        run: |
+          $Tailscale = Get-Command tailscale -ErrorAction Stop
+          $IP = & $Tailscale.Source ip -4
+
+          Write-Host "================================"
+          Write-Host " WINDOWS SERVER 2025 RDP READY "
+          Write-Host "================================"
+          Write-Host "Address:  $IP"
+          Write-Host "Port:     3389"
+          Write-Host "Username: .\rdpuser"
+          Write-Host "Password: RDP_PASSWORD secret"
+          Write-Host "Network:  Tailscale"
+          Write-Host "================================"
+
+          @"
+          ## Windows Server 2025 RDP
+          - Address: $IP
+          - Port: 3389
+          - Username: `.\rdpuser`
+          - Password: Your RDP_PASSWORD secret
+          "@ | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Keep RDP Available
+        shell: powershell
+        run: |
+          Write-Host "Windows RDP is running."
+
+          while ($true) {
+            Start-Sleep -Seconds 60
+          }
