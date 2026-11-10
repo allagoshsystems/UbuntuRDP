@@ -1,4 +1,5 @@
-name: Start Linux RDP
+
+name: Start Full Ubuntu GNOME RDP
 
 on:
   workflow_dispatch:
@@ -12,84 +13,154 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Update package lists
-        run: sudo apt-get update
+      # ==========================================
+      # 1. UPDATE UBUNTU
+      # ==========================================
+      - name: Update Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get upgrade -y
 
-      - name: Install XFCE and XRDP
+      # ==========================================
+      # 2. INSTALL FULL UBUNTU GNOME DESKTOP
+      # ==========================================
+      - name: Install Ubuntu GNOME Desktop
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
+            ubuntu-desktop-minimal \
+            gnome-session \
+            gnome-shell \
+            ubuntu-session \
             xrdp \
+            xorgxrdp \
             dbus-x11 \
-            x11-xserver-utils
+            x11-xserver-utils \
+            policykit-1
 
-      - name: Configure RDP account and XFCE session
+      # ==========================================
+      # 3. INSTALL FIREFOX
+      # ==========================================
+      - name: Install Firefox Browser
+        run: |
+          sudo apt-get install -y wget ca-certificates
+
+          wget -q \
+            "https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US" \
+            -O /tmp/firefox.tar.xz
+
+          sudo tar -xJf /tmp/firefox.tar.xz -C /opt/
+
+          sudo ln -sf /opt/firefox/firefox /usr/local/bin/firefox
+
+          sudo mkdir -p /usr/local/share/applications
+
+          sudo tee /usr/local/share/applications/firefox.desktop > /dev/null <<'EOF'
+          [Desktop Entry]
+          Name=Firefox
+          Comment=Web Browser
+          Exec=/opt/firefox/firefox %u
+          Terminal=false
+          Type=Application
+          Categories=Network;WebBrowser;
+          Icon=/opt/firefox/browser/chrome/icons/default/default128.png
+          StartupNotify=true
+          EOF
+
+      # ==========================================
+      # 4. CONFIGURE RDP USER
+      # ==========================================
+      - name: Configure Ubuntu RDP Account
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        shell: bash
         run: |
-          if [[ -z "$RDP_PASSWORD" ]]; then
-            echo "::error::Repository secret RDP_PASSWORD is missing."
+          if [ -z "$RDP_PASSWORD" ]; then
+            echo "::error::RDP_PASSWORD secret is missing."
             exit 1
           fi
 
           printf 'runner:%s\n' "$RDP_PASSWORD" | sudo chpasswd
 
-          printf '%s\n' 'startxfce4' > "$HOME/.xsession"
-          chmod 700 "$HOME/.xsession"
-
-          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
+          mkdir -p "$HOME/.config"
+          
+          cat > "$HOME/.xsession" <<'EOF'
           #!/bin/sh
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-          exec dbus-run-session -- startxfce4
+          export XDG_CURRENT_DESKTOP=ubuntu:GNOME
+          export XDG_SESSION_DESKTOP=ubuntu
+          export DESKTOP_SESSION=ubuntu
+          export MOZ_ENABLE_WAYLAND=0
+
+          exec dbus-run-session -- gnome-session --session=ubuntu
           EOF
 
-          sudo chmod 755 /etc/xrdp/startwm.sh
+          chmod 700 "$HOME/.xsession"
+
           sudo adduser xrdp ssl-cert || true
 
-      - name: Start XRDP service
+      # ==========================================
+      # 5. CONFIGURE XRDP
+      # ==========================================
+      - name: Configure XRDP
         run: |
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
-          sudo systemctl --no-pager --full status xrdp
 
-      - name: Join Tailscale network
+          sleep 5
+
+          sudo systemctl is-active --quiet xrdp
+
+          echo "XRDP service is running."
+
+      # ==========================================
+      # 6. CONNECT TAILSCALE
+      # ==========================================
+      - name: Connect Tailscale
         uses: tailscale/github-action@v3
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
 
-      - name: Show connection information
+      # ==========================================
+      # 7. DISPLAY RDP INFORMATION
+      # ==========================================
+      - name: Display RDP Connection
         run: |
           RDP_IP="$(tailscale ip -4 | head -n 1)"
-          if [[ -z "$RDP_IP" ]]; then
-            echo "::error::Could not obtain a Tailscale IPv4 address."
+
+          if [ -z "$RDP_IP" ]; then
+            echo "::error::Tailscale IP unavailable."
             exit 1
           fi
 
+          echo "=================================="
+          echo "   UBUNTU GNOME RDP IS READY"
+          echo "=================================="
+          echo "IP: $RDP_IP"
+          echo "Port: 3389"
+          echo "Username: runner"
+          echo "Desktop: Ubuntu GNOME"
+          echo "Browser: Firefox"
+          echo "=================================="
+
           {
-            echo "## Linux RDP is ready"
+            echo "# Ubuntu GNOME RDP Ready"
             echo ""
             echo "| Setting | Value |"
             echo "|---|---|"
-            echo "| Address | \`$RDP_IP\` |"
-            echo "| Port | \`3389\` |"
-            echo "| Username | \`runner\` |"
-            echo "| Password | The value stored in the \`RDP_PASSWORD\` secret |"
-            echo ""
-            echo "On Windows, connect to Tailscale and open Remote Desktop Connection (\`mstsc\`)."
+            echo "| RDP Address | $RDP_IP |"
+            echo "| Port | 3389 |"
+            echo "| Username | runner |"
+            echo "| Desktop | Ubuntu GNOME |"
+            echo "| Browser | Firefox |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "RDP address: $RDP_IP"
-          echo "Username: runner"
-          echo "Port: 3389"
-
-      - name: Keep RDP available until stopped
-        shell: bash
+      # ==========================================
+      # 8. KEEP DESKTOP RUNNING
+      # ==========================================
+      - name: Keep Ubuntu Desktop Alive
         run: |
-          echo "RDP is running. Use the Stop Linux RDP workflow to end this session."
+          echo "Ubuntu GNOME desktop is running."
+          echo "Use Stop Linux RDP to terminate the session."
+
           while true; do
-            echo "RDP session active: $(date -u)"
+            echo "GNOME RDP ACTIVE: $(date -u)"
             sleep 60
           done
