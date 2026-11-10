@@ -36,16 +36,25 @@ jobs:
             network-manager \
             fonts-ubuntu
 
-
       - name: Install Firefox
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          wget -q "https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US" \
-            -O firefox.tar.bz2
+          echo "Downloading Firefox..."
 
-          sudo mkdir -p /opt/firefox
-          sudo tar -xjf firefox.tar.bz2 -C /opt/firefox --strip-components=1
+          curl -fL --retry 3 \
+            "https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US" \
+            -o /tmp/firefox.tar.xz
+
+          echo "Checking downloaded archive..."
+          file /tmp/firefox.tar.xz
+
+          mkdir -p /tmp/firefox-check
+          tar -xJf /tmp/firefox.tar.xz -C /tmp/firefox-check
+
+          sudo rm -rf /opt/firefox
+          sudo mv /tmp/firefox-check/firefox /opt/firefox
 
           sudo ln -sf /opt/firefox/firefox /usr/local/bin/firefox
 
