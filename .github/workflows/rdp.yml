@@ -9,65 +9,55 @@ permissions:
 
 jobs:
   rdp:
-    name: Ubuntu GNOME Remote Desktop
     runs-on: ubuntu-24.04
     timeout-minutes: 350
 
     steps:
-      # 1. Check GitHub secrets before doing any installation
       - name: Validate Secrets
-        shell: bash
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
-          if [[ -z "$RDP_PASSWORD" ]]; then
-            echo "::error::Missing RDP_PASSWORD secret"
+          test -n "$RDP_PASSWORD" || {
+            echo "::error::Missing RDP_PASSWORD"
             exit 1
-          fi
+          }
 
-          if [[ -z "$TS_AUTHKEY" ]]; then
-            echo "::error::Missing TS_AUTHKEY secret"
+          test -n "$TS_AUTHKEY" || {
+            echo "::error::Missing TS_AUTHKEY"
             exit 1
-          fi
+          }
 
-          echo "Required secrets are configured."
-
-      # 2. Install basic tools
-      - name: Prepare Ubuntu
+      - name: Prepare Package Manager
         run: |
           sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates wget gnupg
 
-          sudo apt-get install -y \
-            ca-certificates \
-            wget \
-            gnupg \
-            curl
-
-      # 3. Configure the official Mozilla repository
-      - name: Configure Mozilla Firefox Repository
+      - name: Configure Mozilla Repository
         shell: bash
         run: |
           set -euo pipefail
 
           sudo install -d -m 0755 /etc/apt/keyrings
 
-          wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- \
-            | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
+          wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg \
+            -O /tmp/mozilla-key.gpg
 
           FINGERPRINT="$(gpg --show-keys --with-colons \
-            /etc/apt/keyrings/packages.mozilla.org.asc \
-            | awk -F: '$1 == "fpr" { print $10; exit }')"
+            /tmp/mozilla-key.gpg |
+            awk -F: '$1 == "fpr" {print $10; exit}')"
 
           if [[ "$FINGERPRINT" != "35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3" ]]; then
-            echo "::error::Mozilla signing-key fingerprint verification failed"
+            echo "::error::Mozilla signing key verification failed"
             exit 1
           fi
 
-          echo "Mozilla signing key verified."
+          sudo cp /tmp/mozilla-key.gpg \
+            /etc/apt/keyrings/packages.mozilla.org.asc
 
           echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
-            | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
+            | sudo tee /etc/apt/sources.list.d/mozilla.list
 
           sudo tee /etc/apt/preferences.d/mozilla > /dev/null <<'EOF'
           Package: *
@@ -81,32 +71,29 @@ jobs:
 
           sudo apt-get update
 
-      # 4. Install GNOME, XRDP and Firefox
-      - name: Install Ubuntu GNOME Desktop
+      - name: Install Minimal GNOME and Firefox
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get install -y \
-            ubuntu-desktop-minimal \
-            gnome-session \
-            gnome-shell \
+          set -euo pipefail
+
+          sudo apt-get install -y --no-install-recommends \
             ubuntu-session \
             gnome-terminal \
             nautilus \
-            fonts-ubuntu \
             xrdp \
             xorgxrdp \
             dbus-x11 \
             x11-xserver-utils \
+            policykit-1 \
             firefox
 
-          echo "Desktop and browser installation completed."
+          echo "Installed GNOME components:"
+          dpkg -l | grep -E 'gnome-shell|gnome-session|ubuntu-session|xrdp|firefox' || true
 
           firefox --version
-          gnome-session --version
 
-      # 5. Configure the GNOME XRDP session
-      - name: Configure GNOME Remote Desktop
+      - name: Configure GNOME RDP
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         shell: bash
@@ -119,28 +106,18 @@ jobs:
           #!/bin/sh
 
           export DESKTOP_SESSION=ubuntu-xorg
-          export XDG_SESSION_DESKTOP="$DESKTOP_SESSION"
+          export XDG_SESSION_DESKTOP=ubuntu-xorg
           export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu-xorg:/etc/xdg
           export XDG_CURRENT_DESKTOP=ubuntu:GNOME
-          export XDG_DATA_DIRS=/usr/share/"$DESKTOP_SESSION":/usr/share/gnome:/usr/local/share/:/usr/share/:/var/lib/snapd/desktop
+          export XDG_DATA_DIRS=/usr/share/ubuntu-xorg:/usr/share/gnome:/usr/local/share:/usr/share:/var/lib/snapd/desktop
           export GNOME_SHELL_SESSION_MODE=ubuntu
 
           unset DBUS_SESSION_BUS_ADDRESS
 
-          exec /usr/bin/gnome-session --session=ubuntu
+          exec dbus-run-session -- /usr/bin/gnome-session --session=ubuntu
           EOF
 
           chmod +x "$HOME/.xsession"
-
-          if [ -f /etc/gdm3/custom.conf ]; then
-            sudo sed -i \
-              's/^#WaylandEnable=false/WaylandEnable=false/' \
-              /etc/gdm3/custom.conf
-
-            sudo sed -i \
-              's/^WaylandEnable=true/WaylandEnable=false/' \
-              /etc/gdm3/custom.conf
-          fi
 
           sudo adduser xrdp ssl-cert || true
 
@@ -148,60 +125,48 @@ jobs:
           sudo systemctl restart xrdp-sesman
           sudo systemctl restart xrdp
 
-          echo "GNOME XRDP configuration completed."
-
-      # 6. Verify XRDP is listening
-      - name: Verify RDP Server
-        shell: bash
+      - name: Check RDP
         run: |
           sleep 5
 
-          if ! sudo ss -ltnp | grep -q ':3389'; then
-            echo "::error::XRDP is not listening on port 3389"
-            sudo journalctl -u xrdp -u xrdp-sesman --no-pager -n 80
+          if ! sudo ss -ltn | grep -q ':3389'; then
+            echo "::error::XRDP failed to start"
+            sudo journalctl -u xrdp -u xrdp-sesman --no-pager -n 60
             exit 1
           fi
 
-          echo "XRDP is listening on port 3389."
+          echo "RDP server is listening."
 
-      # 7. Connect the runner to your private Tailscale network
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
 
-      # 8. Display connection information
-      - name: RDP Connection Details
-        shell: bash
+      - name: Display Connection Details
         run: |
-          RDP_IP="$(tailscale ip -4 | head -n 1)"
+          IP="$(tailscale ip -4 | head -n 1)"
 
-          echo "======================================"
-          echo "       UBUNTU GNOME RDP READY"
-          echo "======================================"
-          echo "RDP Address: $RDP_IP"
-          echo "RDP Port:    3389"
-          echo "Username:    runner"
-          echo "Password:    Your RDP_PASSWORD secret"
-          echo "Desktop:     Ubuntu GNOME"
-          echo "Browser:     Firefox"
-          echo "======================================"
+          echo "================================"
+          echo "       GNOME RDP READY"
+          echo "================================"
+          echo "IP:       $IP"
+          echo "Port:     3389"
+          echo "Username: runner"
+          echo "Password: Your RDP_PASSWORD secret"
+          echo "Desktop:  Ubuntu GNOME"
+          echo "Browser:  Firefox"
+          echo "================================"
 
           {
-            echo "## Ubuntu GNOME RDP is ready"
-            echo ""
-            echo "- **Address:** \`$RDP_IP\`"
-            echo "- **Port:** 3389"
-            echo "- **Username:** runner"
-            echo "- **Password:** Your GitHub RDP_PASSWORD secret"
-            echo "- **Desktop:** Ubuntu GNOME"
-            echo "- **Browser:** Firefox"
+            echo "## GNOME RDP READY"
+            echo "- IP: \`$IP\`"
+            echo "- Port: 3389"
+            echo "- Username: runner"
+            echo "- Password: Your RDP_PASSWORD secret"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 9. Keep the remote computer running
-      - name: Keep RDP Alive
+      - name: Keep Desktop Running
         run: |
-          echo "Remote desktop is running."
           while true; do
             sleep 60
           done
