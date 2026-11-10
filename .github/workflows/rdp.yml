@@ -9,39 +9,47 @@ permissions:
 
 jobs:
   rdp:
+    name: Ubuntu GNOME Remote Desktop
     runs-on: ubuntu-24.04
     timeout-minutes: 350
 
     steps:
+      # 1. Validate secrets
       - name: Validate Secrets
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
           test -n "$RDP_PASSWORD" || {
-            echo "::error::Missing RDP_PASSWORD"
+            echo "::error::Missing RDP_PASSWORD secret"
             exit 1
           }
 
           test -n "$TS_AUTHKEY" || {
-            echo "::error::Missing TS_AUTHKEY"
+            echo "::error::Missing TS_AUTHKEY secret"
             exit 1
           }
 
-      - name: Prepare Package Manager
+      # 2. Prepare Ubuntu
+      - name: Prepare Ubuntu
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ca-certificates wget gnupg
 
-      - name: Configure Mozilla Repository
+          sudo apt-get install -y \
+            ca-certificates \
+            wget \
+            gnupg
+
+      # 3. Configure official Mozilla repository
+      - name: Configure Firefox Repository
         shell: bash
         run: |
           set -euo pipefail
 
-          sudo install -d -m 0755 /etc/apt/keyrings
+          sudo mkdir -p /etc/apt/keyrings
 
-          wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg \
+          wget -q \
+            https://packages.mozilla.org/apt/repo-signing-key.gpg \
             -O /tmp/mozilla-key.gpg
 
           FINGERPRINT="$(gpg --show-keys --with-colons \
@@ -71,16 +79,22 @@ jobs:
 
           sudo apt-get update
 
-      - name: Install Minimal GNOME and Firefox
+      # 4. Install GNOME and browser
+      - name: Install GNOME Desktop and Firefox
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -euo pipefail
 
           sudo apt-get install -y --no-install-recommends \
+            gnome-shell \
+            gnome-session \
             ubuntu-session \
             gnome-terminal \
+            gnome-control-center \
+            gnome-shell-extension-ubuntu-dock \
             nautilus \
+            fonts-ubuntu \
             xrdp \
             xorgxrdp \
             dbus-x11 \
@@ -88,85 +102,146 @@ jobs:
             policykit-1 \
             firefox
 
-          echo "Installed GNOME components:"
-          dpkg -l | grep -E 'gnome-shell|gnome-session|ubuntu-session|xrdp|firefox' || true
+          echo "GNOME installation completed."
 
+          gnome-session --version
           firefox --version
 
-      - name: Configure GNOME RDP
+      # 5. Fix XRDP GNOME black screen
+      - name: Configure GNOME XRDP Session
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
 
+          # Set the RDP password
           printf 'runner:%s\n' "$RDP_PASSWORD" | sudo chpasswd
 
-          cat > "$HOME/.xsession" <<'EOF'
-          #!/bin/sh
+          # Remove custom sessions so XRDP uses our configured startup
+          rm -f "$HOME/.xsession" "$HOME/.Xsession" "$HOME/.xsessionrc"
 
+          # Patch XRDP startup script
+          sudo python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("/etc/xrdp/startwm.sh")
+          content = path.read_text()
+
+          marker = "test -x /etc/X11/Xsession && exec /etc/X11/Xsession"
+
+          if marker not in content:
+              raise SystemExit("XRDP startup marker not found")
+
+          block = r'''
+          # Ubuntu GNOME session for XRDP
           export DESKTOP_SESSION=ubuntu-xorg
           export XDG_SESSION_DESKTOP=ubuntu-xorg
           export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu-xorg:/etc/xdg
           export XDG_CURRENT_DESKTOP=ubuntu:GNOME
           export XDG_DATA_DIRS=/usr/share/ubuntu-xorg:/usr/share/gnome:/usr/local/share:/usr/share:/var/lib/snapd/desktop
           export GNOME_SHELL_SESSION_MODE=ubuntu
+          export XDG_SESSION_TYPE=x11
 
-          unset DBUS_SESSION_BUS_ADDRESS
+          ERRFILE="$HOME/.xsession-errors"
+          exec >"$ERRFILE" 2>&1
 
-          exec dbus-run-session -- /usr/bin/gnome-session --session=ubuntu
-          EOF
+          exec /usr/bin/gnome-session --session=ubuntu
+          '''
 
-          chmod +x "$HOME/.xsession"
+          content = content.replace(marker, block, 1)
 
+          path.write_text(content)
+          print("XRDP GNOME startup configured.")
+          PY
+
+          # XRDP service configuration
           sudo adduser xrdp ssl-cert || true
 
           sudo systemctl enable xrdp xrdp-sesman
           sudo systemctl restart xrdp-sesman
           sudo systemctl restart xrdp
 
-      - name: Check RDP
+          echo "GNOME XRDP configuration completed."
+
+      # 6. Verify desktop session files
+      - name: Verify GNOME Session
+        run: |
+          echo "Checking Ubuntu GNOME session..."
+
+          test -x /usr/bin/gnome-session
+
+          if [ ! -f /usr/share/gnome-session/sessions/ubuntu.session ]; then
+            echo "::error::Ubuntu GNOME session file is missing"
+            exit 1
+          fi
+
+          echo "Ubuntu GNOME session exists."
+
+      # 7. Verify XRDP
+      - name: Verify RDP Server
         run: |
           sleep 5
 
           if ! sudo ss -ltn | grep -q ':3389'; then
-            echo "::error::XRDP failed to start"
-            sudo journalctl -u xrdp -u xrdp-sesman --no-pager -n 60
+            echo "::error::XRDP is not listening"
+            sudo journalctl -u xrdp -u xrdp-sesman --no-pager -n 80
             exit 1
           fi
 
-          echo "RDP server is listening."
+          echo "XRDP is listening on port 3389."
 
+      # 8. Connect Tailscale
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
 
-      - name: Display Connection Details
+      # 9. Display connection details
+      - name: RDP Connection Details
         run: |
           IP="$(tailscale ip -4 | head -n 1)"
 
-          echo "================================"
-          echo "       GNOME RDP READY"
-          echo "================================"
-          echo "IP:       $IP"
+          echo "======================================"
+          echo "       UBUNTU GNOME RDP READY"
+          echo "======================================"
+          echo "Address:  $IP"
           echo "Port:     3389"
           echo "Username: runner"
           echo "Password: Your RDP_PASSWORD secret"
           echo "Desktop:  Ubuntu GNOME"
           echo "Browser:  Firefox"
-          echo "================================"
+          echo "======================================"
 
           {
-            echo "## GNOME RDP READY"
-            echo "- IP: \`$IP\`"
+            echo "## Ubuntu GNOME RDP READY"
+            echo ""
+            echo "- Address: \`$IP\`"
             echo "- Port: 3389"
             echo "- Username: runner"
             echo "- Password: Your RDP_PASSWORD secret"
+            echo "- Desktop: Ubuntu GNOME"
+            echo "- Browser: Firefox"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep Desktop Running
+      # 10. Keep the computer running
+      - name: Keep RDP Alive
         run: |
+          echo "Remote computer is running."
+
           while true; do
             sleep 60
           done
+
+      # Diagnostics if an earlier step fails
+      - name: Show XRDP Diagnostics
+        if: failure()
+        run: |
+          echo "===== XRDP SERVICE ====="
+          sudo systemctl status xrdp --no-pager || true
+
+          echo "===== XRDP SESSION MANAGER ====="
+          sudo journalctl -u xrdp-sesman --no-pager -n 100 || true
+
+          echo "===== XRDP SERVER LOG ====="
+          sudo journalctl -u xrdp --no-pager -n 100 || true
