@@ -10,7 +10,7 @@ permissions:
 jobs:
   windows-rdp:
     name: Configure Windows RDP
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-2025
     timeout-minutes: 350
 
     steps:
