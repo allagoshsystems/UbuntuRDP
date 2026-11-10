@@ -9,105 +9,199 @@ permissions:
 
 jobs:
   rdp:
+    name: Ubuntu GNOME Remote Desktop
     runs-on: ubuntu-24.04
     timeout-minutes: 350
 
     steps:
-      - name: Update Ubuntu package lists
+      # 1. Check GitHub secrets before doing any installation
+      - name: Validate Secrets
+        shell: bash
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          if [[ -z "$RDP_PASSWORD" ]]; then
+            echo "::error::Missing RDP_PASSWORD secret"
+            exit 1
+          fi
+
+          if [[ -z "$TS_AUTHKEY" ]]; then
+            echo "::error::Missing TS_AUTHKEY secret"
+            exit 1
+          fi
+
+          echo "Required secrets are configured."
+
+      # 2. Install basic tools
+      - name: Prepare Ubuntu
         run: |
           sudo apt-get update
 
-      - name: Install GNOME Desktop and XRDP
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get install -y --no-install-recommends \
-            ubuntu-desktop-minimal \
-            gnome-session \
-            gnome-shell \
-            ubuntu-session \
-            xrdp \
-            xorgxrdp \
-            dbus-x11 \
-            x11-xserver-utils \
-            policykit-1 \
-            gnome-terminal \
-            nautilus \
-            network-manager \
-            fonts-ubuntu
+          sudo apt-get install -y \
+            ca-certificates \
+            wget \
+            gnupg \
+            curl
 
-      - name: Install Firefox
+      # 3. Configure the official Mozilla repository
+      - name: Configure Mozilla Firefox Repository
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Downloading Firefox..."
+          sudo install -d -m 0755 /etc/apt/keyrings
 
-          curl -fL --retry 3 \
-            "https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US" \
-            -o /tmp/firefox.tar.xz
+          wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- \
+            | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
 
-          echo "Checking downloaded archive..."
-          file /tmp/firefox.tar.xz
+          FINGERPRINT="$(gpg --show-keys --with-colons \
+            /etc/apt/keyrings/packages.mozilla.org.asc \
+            | awk -F: '$1 == "fpr" { print $10; exit }')"
 
-          mkdir -p /tmp/firefox-check
-          tar -xJf /tmp/firefox.tar.xz -C /tmp/firefox-check
-
-          sudo rm -rf /opt/firefox
-          sudo mv /tmp/firefox-check/firefox /opt/firefox
-
-          sudo ln -sf /opt/firefox/firefox /usr/local/bin/firefox
-
-          sudo tee /usr/share/applications/firefox.desktop > /dev/null <<'EOF'
-          [Desktop Entry]
-          Name=Firefox
-          Exec=/usr/local/bin/firefox %u
-          Terminal=false
-          Type=Application
-          Icon=/opt/firefox/browser/chrome/icons/default/default128.png
-          Categories=Network;WebBrowser;
-          EOF
-
-          firefox --version
-          echo "Firefox installed successfully!"
-
-      - name: Configure RDP user and GNOME session
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: |
-          if [ -z "$RDP_PASSWORD" ]; then
-            echo "ERROR: Add RDP_PASSWORD in repository Actions secrets."
+          if [[ "$FINGERPRINT" != "35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3" ]]; then
+            echo "::error::Mozilla signing-key fingerprint verification failed"
             exit 1
           fi
 
+          echo "Mozilla signing key verified."
+
+          echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+            | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
+
+          sudo tee /etc/apt/preferences.d/mozilla > /dev/null <<'EOF'
+          Package: *
+          Pin: origin packages.mozilla.org
+          Pin-Priority: 1000
+
+          Package: firefox
+          Pin: release o=Ubuntu
+          Pin-Priority: -1
+          EOF
+
+          sudo apt-get update
+
+      # 4. Install GNOME, XRDP and Firefox
+      - name: Install Ubuntu GNOME Desktop
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get install -y \
+            ubuntu-desktop-minimal \
+            gnome-session \
+            gnome-shell \
+            ubuntu-session \
+            gnome-terminal \
+            nautilus \
+            fonts-ubuntu \
+            xrdp \
+            xorgxrdp \
+            dbus-x11 \
+            x11-xserver-utils \
+            firefox
+
+          echo "Desktop and browser installation completed."
+
+          firefox --version
+          gnome-session --version
+
+      # 5. Configure the GNOME XRDP session
+      - name: Configure GNOME Remote Desktop
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
           printf 'runner:%s\n' "$RDP_PASSWORD" | sudo chpasswd
 
-          mkdir -p "$HOME"
-          echo "exec dbus-run-session -- gnome-session --session=ubuntu" > "$HOME/.xsession"
+          cat > "$HOME/.xsession" <<'EOF'
+          #!/bin/sh
+
+          export DESKTOP_SESSION=ubuntu-xorg
+          export XDG_SESSION_DESKTOP="$DESKTOP_SESSION"
+          export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu-xorg:/etc/xdg
+          export XDG_CURRENT_DESKTOP=ubuntu:GNOME
+          export XDG_DATA_DIRS=/usr/share/"$DESKTOP_SESSION":/usr/share/gnome:/usr/local/share/:/usr/share/:/var/lib/snapd/desktop
+          export GNOME_SHELL_SESSION_MODE=ubuntu
+
+          unset DBUS_SESSION_BUS_ADDRESS
+
+          exec /usr/bin/gnome-session --session=ubuntu
+          EOF
+
           chmod +x "$HOME/.xsession"
 
+          if [ -f /etc/gdm3/custom.conf ]; then
+            sudo sed -i \
+              's/^#WaylandEnable=false/WaylandEnable=false/' \
+              /etc/gdm3/custom.conf
+
+            sudo sed -i \
+              's/^WaylandEnable=true/WaylandEnable=false/' \
+              /etc/gdm3/custom.conf
+          fi
+
           sudo adduser xrdp ssl-cert || true
-          sudo systemctl enable xrdp
+
+          sudo systemctl enable xrdp xrdp-sesman
+          sudo systemctl restart xrdp-sesman
           sudo systemctl restart xrdp
 
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v3
+          echo "GNOME XRDP configuration completed."
+
+      # 6. Verify XRDP is listening
+      - name: Verify RDP Server
+        shell: bash
+        run: |
+          sleep 5
+
+          if ! sudo ss -ltnp | grep -q ':3389'; then
+            echo "::error::XRDP is not listening on port 3389"
+            sudo journalctl -u xrdp -u xrdp-sesman --no-pager -n 80
+            exit 1
+          fi
+
+          echo "XRDP is listening on port 3389."
+
+      # 7. Connect the runner to your private Tailscale network
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
 
-      - name: Show RDP connection details
+      # 8. Display connection information
+      - name: RDP Connection Details
+        shell: bash
         run: |
-          echo "=================================="
-          echo "GNOME RDP SERVER IS READY"
-          echo "=================================="
-          echo "Username: runner"
-          echo "Password: Your RDP_PASSWORD secret"
-          echo "Tailscale IP:"
-          tailscale ip -4
-          echo "=================================="
+          RDP_IP="$(tailscale ip -4 | head -n 1)"
 
-      - name: Keep RDP running
+          echo "======================================"
+          echo "       UBUNTU GNOME RDP READY"
+          echo "======================================"
+          echo "RDP Address: $RDP_IP"
+          echo "RDP Port:    3389"
+          echo "Username:    runner"
+          echo "Password:    Your RDP_PASSWORD secret"
+          echo "Desktop:     Ubuntu GNOME"
+          echo "Browser:     Firefox"
+          echo "======================================"
+
+          {
+            echo "## Ubuntu GNOME RDP is ready"
+            echo ""
+            echo "- **Address:** \`$RDP_IP\`"
+            echo "- **Port:** 3389"
+            echo "- **Username:** runner"
+            echo "- **Password:** Your GitHub RDP_PASSWORD secret"
+            echo "- **Desktop:** Ubuntu GNOME"
+            echo "- **Browser:** Firefox"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 9. Keep the remote computer running
+      - name: Keep RDP Alive
         run: |
+          echo "Remote desktop is running."
           while true; do
             sleep 60
           done
