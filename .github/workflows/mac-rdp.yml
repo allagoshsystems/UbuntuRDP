@@ -1,0 +1,83 @@
+
+name: macOS Remote Desktop
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac-rdp:
+    name: Start macOS Desktop
+    runs-on: macos-15
+    timeout-minutes: 350
+
+    steps:
+      - name: Show macOS Information
+        run: |
+          echo "===== MACOS INFORMATION ====="
+          sw_vers
+          uname -a
+          whoami
+
+      - name: Enable macOS Screen Sharing
+        env:
+          VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
+        run: |
+          set -e
+
+          if [ -z "$VNC_PASSWORD" ]; then
+            echo "Missing MAC_VNC_PASSWORD secret"
+            exit 1
+          fi
+
+          if [ "${#VNC_PASSWORD}" -gt 8 ]; then
+            echo "VNC legacy password must be 8 characters or fewer"
+            exit 1
+          fi
+
+          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
+
+          sudo "$KICKSTART" \
+            -activate \
+            -configure \
+            -access -on \
+            -users "$(whoami)" \
+            -privs -all \
+            -restart -agent
+
+          sudo "$KICKSTART" \
+            -configure \
+            -clientopts \
+            -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "$VNC_PASSWORD"
+
+          echo "Screen Sharing configured"
+
+      - name: Connect Private Tailscale Network
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+
+      - name: Display Connection Information
+        run: |
+          echo "=================================="
+          echo "       MACOS REMOTE DESKTOP"
+          echo "=================================="
+
+          IP=$(tailscale ip -4)
+
+          echo "VNC ADDRESS: ${IP}:5900"
+          echo "PORT: 5900"
+          echo "USERNAME: $(whoami)"
+          echo "=================================="
+
+          echo "Your macOS desktop is ready."
+
+      - name: Keep Desktop Running
+        run: |
+          echo "macOS desktop is running."
+          while true; do
+            sleep 300
+          done
