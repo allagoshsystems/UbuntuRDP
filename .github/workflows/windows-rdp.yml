@@ -30,14 +30,14 @@ jobs:
 
           Write-Host "Required secrets are configured."
 
-      - name: Configure Windows Remote Desktop
+      - name: Configure Windows Remote Desktop and Administrator
         shell: powershell
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          # Create or update the remote desktop user
+          # Create or update RDP user
           $SecurePassword = ConvertTo-SecureString `
             $env:RDP_PASSWORD -AsPlainText -Force
 
@@ -52,16 +52,37 @@ jobs:
             New-LocalUser `
               -Name "rdpuser" `
               -Password $SecurePassword `
-              -Description "Remote Desktop User" `
+              -Description "Remote Desktop Administrator" `
               -PasswordNeverExpires
           }
 
+          # Ensure password does not expire
+          Set-LocalUser -Name "rdpuser" -PasswordNeverExpires $true
+
+          # Add user to Remote Desktop Users
           Add-LocalGroupMember `
             -Group "Remote Desktop Users" `
             -Member "rdpuser" `
             -ErrorAction SilentlyContinue
 
-          # Enable RDP
+          # IMPORTANT: Give RDP user administrator privileges
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "rdpuser" `
+            -ErrorAction SilentlyContinue
+
+          # Verify administrator membership
+          $AdminMembers = Get-LocalGroupMember -Group "Administrators"
+
+          if (-not ($AdminMembers | Where-Object {
+            $_.Name -match '\\rdpuser$'
+          })) {
+            throw "rdpuser is not a member of Administrators"
+          }
+
+          Write-Host "rdpuser is now a local administrator."
+
+          # Enable Remote Desktop
           $TSPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
           $RDPPath = "$TSPath\WinStations\RDP-Tcp"
 
@@ -71,6 +92,7 @@ jobs:
           Set-ItemProperty -Path $RDPPath `
             -Name UserAuthentication -Value 1
 
+          # Start RDP service
           Set-Service TermService -StartupType Automatic
           Start-Service TermService
 
@@ -79,11 +101,12 @@ jobs:
             -ErrorAction SilentlyContinue |
             Disable-NetFirewallRule
 
-          # Permit RDP only from Tailscale IPv4 addresses
+          # Remove previous custom rule
           Get-NetFirewallRule -DisplayName "RDP over Tailscale only" `
             -ErrorAction SilentlyContinue |
             Remove-NetFirewallRule
 
+          # Allow RDP only through Tailscale
           New-NetFirewallRule `
             -DisplayName "RDP over Tailscale only" `
             -Direction Inbound `
@@ -93,7 +116,7 @@ jobs:
             -RemoteAddress "100.64.0.0/10" `
             -Profile Any
 
-          Write-Host "Windows RDP configured."
+          Write-Host "Windows Server 2025 RDP configured successfully."
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
@@ -113,21 +136,26 @@ jobs:
           Write-Host "Port:     3389"
           Write-Host "Username: .\rdpuser"
           Write-Host "Password: RDP_PASSWORD secret"
+          Write-Host "Admin:    YES"
           Write-Host "Network:  Tailscale"
           Write-Host "================================"
 
           @"
           ## Windows Server 2025 RDP
+
           - Address: $IP
           - Port: 3389
           - Username: `.\rdpuser`
           - Password: Your RDP_PASSWORD secret
+          - Administrator: Enabled
+          - Network: Tailscale
           "@ | Out-File $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Keep RDP Available
         shell: powershell
         run: |
           Write-Host "Windows RDP is running."
+          Write-Host "Administrator account: .\rdpuser"
 
           while ($true) {
             Start-Sleep -Seconds 60
