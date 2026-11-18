@@ -1,5 +1,5 @@
 
-name: macOS VNC Remote Desktop
+name: macOS Remote Desktop - TigerVNC
 
 on:
   workflow_dispatch:
@@ -8,192 +8,141 @@ permissions:
   contents: read
 
 jobs:
-  mac-vnc:
-    name: Configure macOS VNC
+  macos-remote-desktop:
+    name: Start macOS VNC Server
     runs-on: macos-15
     timeout-minutes: 350
 
     steps:
-      # ==========================================
-      # 1. VALIDATE GITHUB SECRETS
-      # ==========================================
-      - name: Validate Secrets
+      - name: Check macOS Environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=================================="
+          echo "MACOS REMOTE DESKTOP"
+          echo "=================================="
+          sw_vers
+          echo "Username: $(whoami)"
+          echo "Architecture: $(uname -m)"
+          echo "=================================="
+
+      - name: Enable Apple Remote Management and VNC
         shell: bash
         env:
-          MAC_VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
         run: |
           set -euo pipefail
 
-          if [ -z "$MAC_VNC_PASSWORD" ]; then
-            echo "ERROR: Missing MAC_VNC_PASSWORD"
+          if [[ -z "$VNC_PASSWORD" ]]; then
+            echo "ERROR: MAC_VNC_PASSWORD secret is missing."
             exit 1
           fi
 
-          # Legacy Apple VNC password: exactly 8 printable ASCII bytes
-          if ! printf '%s' "$MAC_VNC_PASSWORD" |
-            LC_ALL=C awk 'length($0) != 8 || /[^!-~]/ { exit 1 }'; then
-            echo "ERROR: VNC password must be exactly 8 printable ASCII characters."
+          if [[ ${#VNC_PASSWORD} -gt 8 ]]; then
+            echo "ERROR: Legacy VNC password must be 8 characters or fewer."
             exit 1
           fi
-
-          if [ -z "$TS_AUTHKEY" ]; then
-            echo "ERROR: Missing TS_AUTHKEY"
-            exit 1
-          fi
-
-          echo "Secrets validation successful."
-
-      # ==========================================
-      # 2. CONFIGURE APPLE REMOTE MANAGEMENT
-      # ==========================================
-      - name: Enable Apple Remote Management
-        shell: bash
-        run: |
-          set -euo pipefail
 
           KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
 
-          if [ ! -x "$KICKSTART" ]; then
-            echo "ERROR: Apple Remote Management not found."
-            exit 1
-          fi
-
-          MAC_USER="$(whoami)"
-
-          echo "Configuring Remote Management..."
-          echo "Account: $MAC_USER"
+          echo "Configuring Apple Remote Management..."
 
           sudo "$KICKSTART" \
             -activate \
             -configure \
             -access -on \
-            -users "$MAC_USER" \
-            -privs -all
-
-          echo "Apple Remote Management activated."
-
-      # ==========================================
-      # 3. CONFIGURE LEGACY VNC PASSWORD
-      # ==========================================
-      - name: Configure VNC Authentication
-        shell: bash
-        env:
-          MAC_VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
-        run: |
-          set -euo pipefail
-          set +x
-
-          KICKSTART="/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart"
-
-          echo "Enabling legacy VNC authentication..."
-
-          sudo "$KICKSTART" \
-            -configure \
+            -users "$(whoami)" \
+            -privs -all \
             -clientopts \
-            -setvnclegacy \
-            -vnclegacy yes \
-            -setvncpw \
-            -vncpw "$MAC_VNC_PASSWORD"
+            -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "$VNC_PASSWORD" \
+            -restart -agent
 
-          echo "Restarting Apple Remote Desktop agent..."
+          echo "Remote Management configuration completed."
 
-          sudo "$KICKSTART" -restart -agent
-
-          sleep 10
-
-          echo "VNC authentication configuration completed."
-
-      # ==========================================
-      # 4. VERIFY LOCAL VNC SERVER
-      # ==========================================
-      - name: Verify Local VNC
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Checking VNC port 5900..."
-
-          for i in {1..15}; do
-            if nc -z -w 3 127.0.0.1 5900; then
-              echo "SUCCESS: VNC is listening locally."
-              break
-            fi
-
-            if [ "$i" -eq 15 ]; then
-              echo "ERROR: VNC server did not start."
-              sudo lsof -nP -iTCP:5900 || true
-              exit 1
-            fi
-
-            sleep 2
-          done
-
-          echo "VNC local connection verified."
-
-      # ==========================================
-      # 5. CONNECT TAILSCALE
-      # ==========================================
-      - name: Connect Tailscale
-        uses: tailscale/github-action@v4
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
 
-      # ==========================================
-      # 6. VERIFY TAILSCALE CONNECTION
-      # ==========================================
-      - name: Verify Network and Display Credentials
+      - name: Display Tailscale Connection Information
         shell: bash
         run: |
           set -euo pipefail
 
-          IP="$(tailscale ip -4 | head -n 1)"
-          USER_NAME="$(whoami)"
+          echo "Tailscale status:"
+          tailscale status
 
-          if [ -z "$IP" ]; then
-            echo "ERROR: Tailscale IP unavailable."
+          MAC_IP="$(tailscale ip -4 | head -n 1)"
+
+          if [[ -z "$MAC_IP" ]]; then
+            echo "ERROR: Tailscale IP not found."
             exit 1
           fi
 
-          echo "Testing VNC through Tailscale..."
-
-          if ! nc -z -w 10 "$IP" 5900; then
-            echo "ERROR: VNC is not reachable through Tailscale."
-            exit 1
-          fi
-
-          echo "===================================="
-          echo "       MACOS VNC IS READY"
-          echo "===================================="
-          echo "Address: $IP"
-          echo "Port: 5900"
-          echo "macOS account: $USER_NAME"
-          echo "Authentication: VNC Password"
-          echo "Password: GitHub MAC_VNC_PASSWORD"
-          echo "Network: Tailscale"
-          echo "===================================="
+          echo "=================================="
+          echo "MACOS VNC CONNECTION"
+          echo "=================================="
+          echo "IP ADDRESS: $MAC_IP"
+          echo "VNC PORT: 5900"
+          echo "USERNAME: $(whoami)"
+          echo "=================================="
 
           {
-            echo "## macOS VNC Remote Desktop"
+            echo "## macOS VNC Connection"
             echo ""
-            echo "- Address: $IP"
-            echo "- Port: 5900"
-            echo "- macOS account: $USER_NAME"
-            echo "- Authentication: VNC Password"
-            echo "- Password: GitHub MAC_VNC_PASSWORD secret"
-            echo "- Network: Tailscale"
+            echo "- **IP:** \`$MAC_IP\`"
+            echo "- **Port:** \`5900\`"
+            echo "- **Username:** \`$(whoami)\`"
+            echo "- **Client:** TigerVNC Viewer"
+            echo ""
+            echo "Connect using: \`$MAC_IP:5900\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ==========================================
-      # 7. KEEP MACOS RUNNER ALIVE
-      # ==========================================
-      - name: Keep VNC Available
+      - name: Verify VNC Server
         shell: bash
         run: |
-          echo "===================================="
-          echo "macOS VNC SERVER RUNNING"
-          echo "===================================="
+          set -euo pipefail
+
+          echo "Testing local VNC service..."
+
+          for i in {1..30}; do
+            if nc -z 127.0.0.1 5900; then
+              echo "SUCCESS: VNC port 5900 is listening."
+              break
+            fi
+
+            echo "Waiting for VNC server... ($i/30)"
+            sleep 2
+          done
+
+          if ! nc -z 127.0.0.1 5900; then
+            echo "ERROR: VNC server did not start."
+            sudo launchctl list | grep -i -E 'remote|screen' || true
+            exit 1
+          fi
+
+          echo "VNC server port verification completed."
+
+      - name: Verify Remote Management Status
+        shell: bash
+        run: |
+          echo "Checking Apple Remote Management..."
+          sudo launchctl list | grep -i -E 'remote|screen' || true
+
+          echo "Checking VNC port..."
+          nc -vz 127.0.0.1 5900
+
+          echo "Diagnostics completed."
+
+      - name: Keep macOS Runner Alive
+        shell: bash
+        run: |
+          echo "=================================="
+          echo "MACOS REMOTE DESKTOP IS RUNNING"
+          echo "=================================="
 
           while true; do
-            sleep 60
+            echo "VNC session active: $(date)"
+            sleep 300
           done
